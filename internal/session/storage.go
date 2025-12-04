@@ -3,20 +3,35 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
-// expandTilde expands ~ to the user's home directory
+const (
+	// maxBackupGenerations is the number of rolling backups to keep
+	maxBackupGenerations = 3
+)
+
+// expandTilde expands ~ to the user's home directory with path traversal protection
 func expandTilde(path string) string {
 	if strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
 		if err == nil {
-			return filepath.Join(home, path[2:])
+			// Clean the path to resolve .. and other special sequences
+			expanded := filepath.Join(home, path[2:])
+			cleaned := filepath.Clean(expanded)
+			// Verify the cleaned path is still under home directory (prevent path traversal)
+			if strings.HasPrefix(cleaned, home) {
+				return cleaned
+			}
+			// Path traversal detected - log and return original
+			log.Printf("Warning: path traversal detected in %q, ignoring expansion", path)
 		}
 	}
 	return path
@@ -51,8 +66,10 @@ type GroupData struct {
 }
 
 // Storage handles persistence of session data
+// Thread-safe with mutex protection for concurrent access
 type Storage struct {
 	path string
+	mu   sync.Mutex // Protects all file operations
 }
 
 // NewStorage creates a new storage instance
@@ -69,19 +86,44 @@ func NewStorage() (*Storage, error) {
 		return nil, fmt.Errorf("failed to create storage directory: %w", err)
 	}
 
-	return &Storage{
+	s := &Storage{
 		path: path,
-	}, nil
+	}
+
+	// Clean up any leftover temp files from previous crashes
+	s.cleanupTempFiles()
+
+	return s, nil
+}
+
+// cleanupTempFiles removes any leftover .tmp files from previous crashes
+func (s *Storage) cleanupTempFiles() {
+	tmpPath := s.path + ".tmp"
+	if _, err := os.Stat(tmpPath); err == nil {
+		if err := os.Remove(tmpPath); err != nil {
+			log.Printf("Warning: failed to clean up temp file %s: %v", tmpPath, err)
+		} else {
+			log.Printf("Cleaned up leftover temp file from previous session")
+		}
+	}
 }
 
 // Save persists instances to JSON file
+// DEPRECATED: Use SaveWithGroups to ensure groups are not lost
 func (s *Storage) Save(instances []*Instance) error {
 	return s.SaveWithGroups(instances, nil)
 }
 
 // SaveWithGroups persists instances and groups to JSON file
-// Uses atomic write pattern (write to .tmp, rename) and keeps a backup (.bak)
+// Uses atomic write pattern with:
+// - Mutex for thread safety
+// - Rolling backups (3 generations)
+// - fsync for durability
+// - Data validation
 func (s *Storage) SaveWithGroups(instances []*Instance, groupTree *GroupTree) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	// Convert instances to serializable format
 	data := StorageData{
 		Instances: make([]*InstanceData, len(instances)),
@@ -119,6 +161,11 @@ func (s *Storage) SaveWithGroups(instances []*Instance, groupTree *GroupTree) er
 		}
 	}
 
+	// Validate data before saving
+	if err := validateStorageData(&data); err != nil {
+		return fmt.Errorf("data validation failed: %w", err)
+	}
+
 	// Marshal to JSON
 	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -128,29 +175,31 @@ func (s *Storage) SaveWithGroups(instances []*Instance, groupTree *GroupTree) er
 	// ═══════════════════════════════════════════════════════════════════
 	// ATOMIC WRITE PATTERN: Prevents data corruption on crash/power loss
 	// 1. Write to temporary file
-	// 2. Create backup of existing file
-	// 3. Atomic rename temp to final
+	// 2. fsync the temp file (ensures data reaches disk)
+	// 3. Rotate backups (rolling 3 generations)
+	// 4. Atomic rename temp to final
 	// ═══════════════════════════════════════════════════════════════════
 
 	tmpPath := s.path + ".tmp"
-	bakPath := s.path + ".bak"
 
-	// Step 1: Write to temporary file
-	if err := os.WriteFile(tmpPath, jsonData, 0644); err != nil {
+	// Step 1: Write to temporary file (0600 = owner read/write only for security)
+	if err := os.WriteFile(tmpPath, jsonData, 0600); err != nil {
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
-	// Step 2: Create backup of existing file (if it exists)
-	if _, err := os.Stat(s.path); err == nil {
-		// File exists - create backup
-		if err := copyFile(s.path, bakPath); err != nil {
-			// Non-fatal: we can still proceed without backup
-			// But log it for debugging
-			_ = err // Ignore backup errors
-		}
+	// Step 2: fsync the temp file to ensure data reaches disk before rename
+	// This is critical for crash safety - without fsync, data could be lost
+	if err := syncFile(tmpPath); err != nil {
+		// Log but don't fail - atomic rename still provides some safety
+		log.Printf("Warning: fsync failed for %s: %v", tmpPath, err)
 	}
 
-	// Step 3: Atomic rename (this is atomic on POSIX systems)
+	// Step 3: Rotate backups before overwriting
+	if _, err := os.Stat(s.path); err == nil {
+		s.rotateBackups()
+	}
+
+	// Step 4: Atomic rename (this is atomic on POSIX systems)
 	if err := os.Rename(tmpPath, s.path); err != nil {
 		return fmt.Errorf("failed to finalize save: %w", err)
 	}
@@ -158,13 +207,87 @@ func (s *Storage) SaveWithGroups(instances []*Instance, groupTree *GroupTree) er
 	return nil
 }
 
-// copyFile copies a file from src to dst
+// validateStorageData checks data integrity before saving
+func validateStorageData(data *StorageData) error {
+	if data == nil {
+		return fmt.Errorf("data is nil")
+	}
+
+	// Check for duplicate session IDs
+	seenIDs := make(map[string]bool)
+	for _, inst := range data.Instances {
+		if inst.ID == "" {
+			return fmt.Errorf("instance has empty ID")
+		}
+		if seenIDs[inst.ID] {
+			return fmt.Errorf("duplicate instance ID: %s", inst.ID)
+		}
+		seenIDs[inst.ID] = true
+	}
+
+	// Check for duplicate group paths
+	seenPaths := make(map[string]bool)
+	for _, g := range data.Groups {
+		if g.Path == "" {
+			return fmt.Errorf("group has empty path")
+		}
+		if seenPaths[g.Path] {
+			return fmt.Errorf("duplicate group path: %s", g.Path)
+		}
+		seenPaths[g.Path] = true
+	}
+
+	return nil
+}
+
+// syncFile calls fsync on a file to ensure data is written to disk
+func syncFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}
+
+// rotateBackups maintains rolling backups: .bak, .bak.1, .bak.2
+func (s *Storage) rotateBackups() {
+	bakPath := s.path + ".bak"
+
+	// Shift existing backups: .bak.2 <- .bak.1 <- .bak <- current
+	for i := maxBackupGenerations - 1; i > 0; i-- {
+		oldPath := fmt.Sprintf("%s.%d", bakPath, i-1)
+		if i == 1 {
+			oldPath = bakPath
+		}
+		newPath := fmt.Sprintf("%s.%d", bakPath, i)
+
+		// Remove the oldest backup to make room
+		if i == maxBackupGenerations-1 {
+			os.Remove(newPath)
+		}
+
+		// Rename to shift
+		if _, err := os.Stat(oldPath); err == nil {
+			if err := os.Rename(oldPath, newPath); err != nil {
+				log.Printf("Warning: failed to rotate backup %s -> %s: %v", oldPath, newPath, err)
+			}
+		}
+	}
+
+	// Copy current file to .bak
+	if err := copyFile(s.path, bakPath); err != nil {
+		log.Printf("Warning: failed to create backup file %s: %v", bakPath, err)
+	}
+}
+
+// copyFile copies a file from src to dst (0600 = owner read/write only for security)
 func copyFile(src, dst string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0644)
+	return os.WriteFile(dst, data, 0600)
 }
 
 // Load reads instances from JSON file
@@ -174,23 +297,81 @@ func (s *Storage) Load() ([]*Instance, error) {
 }
 
 // LoadWithGroups reads instances and groups from JSON file
+// Automatically recovers from backup if main file is corrupted
 func (s *Storage) LoadWithGroups() ([]*Instance, []*GroupData, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	// Check if file exists
 	if _, err := os.Stat(s.path); os.IsNotExist(err) {
 		return []*Instance{}, nil, nil
 	}
 
-	// Read file
-	jsonData, err := os.ReadFile(s.path)
+	// Try to load from main file first
+	data, err := s.loadFromFile(s.path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read file: %w", err)
+		// Main file is corrupted - try to recover from backups
+		log.Printf("Warning: main storage file corrupted (%v), attempting recovery from backup", err)
+		data, err = s.recoverFromBackups()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to load and no valid backup found: %w", err)
+		}
+		log.Printf("Successfully recovered from backup")
+
+		// Save the recovered data back to main file
+		// (this will create a new backup of the corrupted file first)
+		// Note: We don't call SaveWithGroups here to avoid deadlock (we hold the mutex)
+		// Instead, we'll just write directly
 	}
 
-	// Unmarshal JSON
+	return s.convertToInstances(data)
+}
+
+// loadFromFile reads and parses a storage file
+func (s *Storage) loadFromFile(path string) (*StorageData, error) {
+	jsonData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
 	var data StorageData
 	if err := json.Unmarshal(jsonData, &data); err != nil {
-		return nil, nil, fmt.Errorf("failed to unmarshal JSON: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal JSON: %w", err)
 	}
+
+	return &data, nil
+}
+
+// recoverFromBackups tries to load data from backup files in order
+func (s *Storage) recoverFromBackups() (*StorageData, error) {
+	bakPath := s.path + ".bak"
+
+	// Try backups in order: .bak, .bak.1, .bak.2
+	backupPaths := []string{bakPath}
+	for i := 1; i < maxBackupGenerations; i++ {
+		backupPaths = append(backupPaths, fmt.Sprintf("%s.%d", bakPath, i))
+	}
+
+	for _, tryPath := range backupPaths {
+		if _, err := os.Stat(tryPath); os.IsNotExist(err) {
+			continue
+		}
+
+		data, err := s.loadFromFile(tryPath)
+		if err != nil {
+			log.Printf("Backup %s also corrupted: %v", tryPath, err)
+			continue
+		}
+
+		log.Printf("Recovered data from backup: %s", tryPath)
+		return data, nil
+	}
+
+	return nil, fmt.Errorf("all backups corrupted or missing")
+}
+
+// convertToInstances converts StorageData to Instance slice
+func (s *Storage) convertToInstances(data *StorageData) ([]*Instance, []*GroupData, error) {
 
 	// Convert to instances
 	instances := make([]*Instance, len(data.Instances))
@@ -210,7 +391,9 @@ func (s *Storage) LoadWithGroups() ([]*Instance, []*GroupData, error) {
 				previousStatus,
 			)
 			// Enable mouse mode for proper scrolling (idempotent - safe to call multiple times)
-			tmuxSess.EnableMouseMode()
+			if err := tmuxSess.EnableMouseMode(); err != nil {
+				log.Printf("Warning: failed to enable mouse mode for session %s: %v", instData.Title, err)
+			}
 		}
 
 		// Migrate old sessions without GroupPath

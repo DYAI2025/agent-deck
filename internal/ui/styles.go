@@ -265,8 +265,8 @@ var (
 // Timestamp Style
 var (
 	TimestampStyle = lipgloss.NewStyle().
-			Foreground(ColorComment).
-			Italic(true)
+		Foreground(ColorComment).
+		Italic(true)
 )
 
 // Folder Styles
@@ -295,9 +295,9 @@ var (
 // Menu Styles
 var (
 	MenuStyle = lipgloss.NewStyle().
-			Background(ColorSurface).
-			Foreground(ColorText).
-			Padding(0, 1)
+		Background(ColorSurface).
+		Foreground(ColorText).
+		Padding(0, 1)
 )
 
 // Additional Styles

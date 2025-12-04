@@ -3,7 +3,11 @@ package session
 import (
 	"sort"
 	"strings"
+	"unicode"
 )
+
+// DefaultGroupName is the name used for the default group where ungrouped sessions go
+const DefaultGroupName = "default"
 
 // ItemType represents the type of item in the flattened list
 type ItemType int
@@ -15,20 +19,20 @@ const (
 
 // Item represents a single item in the flattened group tree view
 type Item struct {
-	Type     ItemType
-	Group    *Group
-	Session  *Instance
-	Level    int    // Indentation level (0 for root groups, 1 for sessions)
-	Path     string // Group path for this item
+	Type    ItemType
+	Group   *Group
+	Session *Instance
+	Level   int    // Indentation level (0 for root groups, 1 for sessions)
+	Path    string // Group path for this item
 }
 
 // Group represents a group of sessions
 type Group struct {
-	Name      string
-	Path      string // Full path like "projects" or "projects/devops"
-	Expanded  bool
-	Sessions  []*Instance
-	Order     int
+	Name     string
+	Path     string // Full path like "projects" or "projects/devops"
+	Expanded bool
+	Sessions []*Instance
+	Order    int
 }
 
 // GroupTree manages hierarchical session organization
@@ -49,7 +53,7 @@ func NewGroupTree(instances []*Instance) *GroupTree {
 	for _, inst := range instances {
 		groupPath := inst.GroupPath
 		if groupPath == "" {
-			groupPath = "default"
+			groupPath = DefaultGroupName
 		}
 
 		group, exists := tree.Groups[groupPath]
@@ -96,7 +100,7 @@ func NewGroupTreeWithGroups(instances []*Instance, storedGroups []*GroupData) *G
 	for _, inst := range instances {
 		groupPath := inst.GroupPath
 		if groupPath == "" {
-			groupPath = "default"
+			groupPath = DefaultGroupName
 		}
 
 		group, exists := tree.Groups[groupPath]
@@ -238,6 +242,25 @@ func (t *GroupTree) ExpandGroup(path string) {
 	}
 }
 
+// ExpandGroupWithParents expands a group and all its parent groups
+// This ensures the group and its contents are visible in the flattened view
+func (t *GroupTree) ExpandGroupWithParents(path string) {
+	// Expand all parent groups first
+	parts := strings.Split(path, "/")
+	currentPath := ""
+	for i := 0; i < len(parts); i++ {
+		if currentPath == "" {
+			currentPath = parts[i]
+		} else {
+			currentPath = currentPath + "/" + parts[i]
+		}
+		if group, exists := t.Groups[currentPath]; exists {
+			group.Expanded = true
+			t.Expanded[currentPath] = true
+		}
+	}
+}
+
 // CollapseGroup collapses a group
 func (t *GroupTree) CollapseGroup(path string) {
 	if group, exists := t.Groups[path]; exists {
@@ -341,15 +364,52 @@ func (t *GroupTree) MoveSessionToGroup(inst *Instance, newGroupPath string) {
 	newGroup.Sessions = append(newGroup.Sessions, inst)
 }
 
+// sanitizeGroupName removes dangerous characters from group names
+// to prevent path traversal and other security issues
+func sanitizeGroupName(name string) string {
+	// Remove or replace dangerous characters
+	var result strings.Builder
+	result.Grow(len(name))
+
+	for _, r := range name {
+		// Allow letters, digits, spaces, hyphens, and underscores
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || r == '-' || r == '_' {
+			result.WriteRune(r)
+		} else if r == '/' || r == '\\' || r == '.' {
+			// Replace path separators and dots with hyphens
+			result.WriteRune('-')
+		}
+		// Other characters are dropped
+	}
+
+	// Clean up multiple consecutive hyphens
+	cleaned := result.String()
+	for strings.Contains(cleaned, "--") {
+		cleaned = strings.ReplaceAll(cleaned, "--", "-")
+	}
+
+	// Trim leading/trailing hyphens and spaces
+	cleaned = strings.Trim(cleaned, "- ")
+
+	// If the result is empty after sanitization, use a default
+	if cleaned == "" {
+		return "unnamed"
+	}
+
+	return cleaned
+}
+
 // CreateGroup creates a new empty group
 func (t *GroupTree) CreateGroup(name string) *Group {
-	path := strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+	// Sanitize name to prevent path traversal and security issues
+	sanitizedName := sanitizeGroupName(name)
+	path := strings.ToLower(strings.ReplaceAll(sanitizedName, " ", "-"))
 	if _, exists := t.Groups[path]; exists {
 		return t.Groups[path]
 	}
 
 	group := &Group{
-		Name:     name,
+		Name:     sanitizedName,
 		Path:     path,
 		Expanded: true,
 		Sessions: []*Instance{},
@@ -363,7 +423,9 @@ func (t *GroupTree) CreateGroup(name string) *Group {
 
 // CreateSubgroup creates a new empty group under a parent group
 func (t *GroupTree) CreateSubgroup(parentPath, name string) *Group {
-	childPath := strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+	// Sanitize name to prevent path traversal and security issues
+	sanitizedName := sanitizeGroupName(name)
+	childPath := strings.ToLower(strings.ReplaceAll(sanitizedName, " ", "-"))
 	fullPath := parentPath + "/" + childPath
 
 	if _, exists := t.Groups[fullPath]; exists {
@@ -371,7 +433,7 @@ func (t *GroupTree) CreateSubgroup(parentPath, name string) *Group {
 	}
 
 	group := &Group{
-		Name:     name,
+		Name:     sanitizedName,
 		Path:     fullPath,
 		Expanded: true,
 		Sessions: []*Instance{},
@@ -390,9 +452,11 @@ func (t *GroupTree) RenameGroup(oldPath, newName string) {
 		return
 	}
 
-	newPath := strings.ToLower(strings.ReplaceAll(newName, " ", "-"))
+	// Sanitize name to prevent path traversal and security issues
+	sanitizedName := sanitizeGroupName(newName)
+	newPath := strings.ToLower(strings.ReplaceAll(sanitizedName, " ", "-"))
 	if newPath == oldPath {
-		group.Name = newName
+		group.Name = sanitizedName
 		return
 	}
 
@@ -425,7 +489,7 @@ func (t *GroupTree) RenameGroup(oldPath, newName string) {
 	}
 
 	// Update the main group
-	group.Name = newName
+	group.Name = sanitizedName
 	group.Path = newPath
 
 	// Update maps for main group
@@ -440,7 +504,7 @@ func (t *GroupTree) RenameGroup(oldPath, newName string) {
 // DeleteGroup deletes a group, all its subgroups, and moves all sessions to default
 func (t *GroupTree) DeleteGroup(path string) []*Instance {
 	group, exists := t.Groups[path]
-	if !exists || path == "default" {
+	if !exists || path == DefaultGroupName {
 		return nil
 	}
 
@@ -469,19 +533,19 @@ func (t *GroupTree) DeleteGroup(path string) []*Instance {
 
 	// Move all sessions to default group
 	for _, sess := range allMovedSessions {
-		sess.GroupPath = "default"
+		sess.GroupPath = DefaultGroupName
 	}
 
 	// Ensure default group exists
-	defaultGroup, exists := t.Groups["default"]
+	defaultGroup, exists := t.Groups[DefaultGroupName]
 	if !exists {
 		defaultGroup = &Group{
-			Name:     "default",
-			Path:     "default",
+			Name:     DefaultGroupName,
+			Path:     DefaultGroupName,
 			Expanded: true,
 			Sessions: []*Instance{},
 		}
-		t.Groups["default"] = defaultGroup
+		t.Groups[DefaultGroupName] = defaultGroup
 	}
 	defaultGroup.Sessions = append(defaultGroup.Sessions, allMovedSessions...)
 
@@ -529,7 +593,7 @@ func (t *GroupTree) GroupCount() int {
 func (t *GroupTree) AddSession(inst *Instance) {
 	groupPath := inst.GroupPath
 	if groupPath == "" {
-		groupPath = "default"
+		groupPath = DefaultGroupName
 		inst.GroupPath = groupPath
 	}
 
@@ -553,7 +617,7 @@ func (t *GroupTree) AddSession(inst *Instance) {
 func (t *GroupTree) RemoveSession(inst *Instance) {
 	groupPath := inst.GroupPath
 	if groupPath == "" {
-		groupPath = "default"
+		groupPath = DefaultGroupName
 	}
 
 	if group, exists := t.Groups[groupPath]; exists {
@@ -588,7 +652,7 @@ func (t *GroupTree) SyncWithInstances(instances []*Instance) {
 	for _, inst := range instances {
 		groupPath := inst.GroupPath
 		if groupPath == "" {
-			groupPath = "default"
+			groupPath = DefaultGroupName
 			inst.GroupPath = groupPath
 		}
 

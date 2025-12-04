@@ -10,12 +10,20 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"github.com/asheshgoplani/agent-deck/internal/ui"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 const Version = "0.1.0"
+
+// Table column widths for list command output
+const (
+	tableColTitle     = 20
+	tableColGroup     = 15
+	tableColPath      = 40
+	tableColIDDisplay = 12
+)
 
 func main() {
 	// Handle subcommands
@@ -235,13 +243,13 @@ func handleList(args []string) {
 	if *jsonOutput {
 		// JSON output for scripting
 		type sessionJSON struct {
-			ID          string    `json:"id"`
-			Title       string    `json:"title"`
-			Path        string    `json:"path"`
-			Group       string    `json:"group"`
-			Tool        string    `json:"tool"`
-			Command     string    `json:"command,omitempty"`
-			CreatedAt   time.Time `json:"created_at"`
+			ID        string    `json:"id"`
+			Title     string    `json:"title"`
+			Path      string    `json:"path"`
+			Group     string    `json:"group"`
+			Tool      string    `json:"tool"`
+			Command   string    `json:"command,omitempty"`
+			CreatedAt time.Time `json:"created_at"`
 		}
 		sessions := make([]sessionJSON, len(instances))
 		for i, inst := range instances {
@@ -255,19 +263,28 @@ func handleList(args []string) {
 				CreatedAt: inst.CreatedAt,
 			}
 		}
-		output, _ := json.MarshalIndent(sessions, "", "  ")
+		output, err := json.MarshalIndent(sessions, "", "  ")
+		if err != nil {
+			fmt.Printf("Error: failed to format JSON output: %v\n", err)
+			os.Exit(1)
+		}
 		fmt.Println(string(output))
 		return
 	}
 
 	// Table output
-	fmt.Printf("%-20s %-15s %-40s %s\n", "TITLE", "GROUP", "PATH", "ID")
-	fmt.Println(strings.Repeat("-", 100))
+	fmt.Printf("%-*s %-*s %-*s %s\n", tableColTitle, "TITLE", tableColGroup, "GROUP", tableColPath, "PATH", "ID")
+	fmt.Println(strings.Repeat("-", tableColTitle+tableColGroup+tableColPath+tableColIDDisplay+5))
 	for _, inst := range instances {
-		title := truncate(inst.Title, 20)
-		group := truncate(inst.GroupPath, 15)
-		path := truncate(inst.ProjectPath, 40)
-		fmt.Printf("%-20s %-15s %-40s %s\n", title, group, path, inst.ID[:12])
+		title := truncate(inst.Title, tableColTitle)
+		group := truncate(inst.GroupPath, tableColGroup)
+		path := truncate(inst.ProjectPath, tableColPath)
+		// Safe ID display with bounds check to prevent panic
+		idDisplay := inst.ID
+		if len(idDisplay) > tableColIDDisplay {
+			idDisplay = idDisplay[:tableColIDDisplay]
+		}
+		fmt.Printf("%-*s %-*s %-*s %s\n", tableColTitle, title, tableColGroup, group, tableColPath, path, idDisplay)
 	}
 	fmt.Printf("\nTotal: %d sessions\n", len(instances))
 }
@@ -318,7 +335,10 @@ func handleRemove(args []string) {
 			removedTitle = inst.Title
 			// Kill tmux session if it exists
 			if inst.Exists() {
-				inst.Kill()
+				if err := inst.Kill(); err != nil {
+					fmt.Printf("Warning: failed to kill tmux session: %v\n", err)
+					fmt.Println("Session removed from Agent Deck but may still be running in tmux")
+				}
 			}
 		} else {
 			newInstances = append(newInstances, inst)

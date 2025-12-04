@@ -58,9 +58,10 @@ var toolDetectionPatterns = map[string][]*regexp.Regexp{
 // StateTracker tracks content changes for notification-style status detection
 //
 // StateTracker implements a simple 3-state model:
-//   GREEN (active)   = Content changed within 2 seconds
-//   YELLOW (waiting) = Content stable, user hasn't seen it
-//   GRAY (idle)      = Content stable, user has seen it
+//
+//	GREEN (active)   = Content changed within 2 seconds
+//	YELLOW (waiting) = Content stable, user hasn't seen it
+//	GRAY (idle)      = Content stable, user has seen it
 type StateTracker struct {
 	lastHash       string    // SHA256 of normalized content
 	lastChangeTime time.Time // When content last changed
@@ -74,30 +75,40 @@ type StateTracker struct {
 const activityCooldown = 2 * time.Second
 
 // Session represents a tmux session
+// NOTE: All mutable fields are protected by mu. The Bubble Tea event loop is single-threaded,
+// but we use mutex protection for defensive programming and future-proofing.
 type Session struct {
 	Name        string
 	DisplayName string
 	WorkDir     string
 	Command     string
 	Created     time.Time
-	lastHash    string // Used by HasUpdated/analyzeContent (separate from StateTracker)
-	lastContent string // Used by HasUpdated/analyzeContent (separate from StateTracker)
+
+	// mu protects all mutable fields below from concurrent access
+	mu sync.Mutex
+
+	// Content tracking for HasUpdated (separate from StateTracker)
+	lastHash    string
+	lastContent string
+
 	// Cached tool detection (avoids re-detecting every status check)
 	detectedTool     string
 	toolDetectedAt   time.Time
 	toolDetectExpiry time.Duration // How long before re-detecting (default 30s)
+
 	// Simple state tracking (hash-based)
-	stateTracker   *StateTracker
-	stateTrackerMu sync.Mutex // Protects stateTracker from concurrent access
+	stateTracker *StateTracker
+
 	// Last status returned (for debugging)
 	lastStableStatus string
+
 	// Prompt detection (for tool-specific prompts)
 	promptDetector *PromptDetector
 }
 
 // ensureStateTrackerLocked lazily allocates the tracker so callers can safely
 // acknowledge even before the first GetStatus call.
-// MUST be called with stateTrackerMu held.
+// MUST be called with mu held.
 func (s *Session) ensureStateTrackerLocked() {
 	if s.stateTracker == nil {
 		s.stateTracker = &StateTracker{
@@ -275,6 +286,7 @@ func (s *Session) EnableMouseMode() error {
 	clipboardCmd := exec.Command("tmux", "set-option", "-t", s.Name, "set-clipboard", "on")
 	if err := clipboardCmd.Run(); err != nil {
 		// Non-fatal: older tmux versions may not support this
+		debugLog("%s: failed to enable clipboard: %v", s.DisplayName, err)
 	}
 
 	// Set large history limit for AI agent sessions (default is 2000)
@@ -282,6 +294,7 @@ func (s *Session) EnableMouseMode() error {
 	historyCmd := exec.Command("tmux", "set-option", "-t", s.Name, "history-limit", "50000")
 	if err := historyCmd.Run(); err != nil {
 		// Non-fatal: history limit is a nice-to-have
+		debugLog("%s: failed to set history-limit: %v", s.DisplayName, err)
 	}
 
 	return nil
@@ -304,11 +317,12 @@ func (s *Session) CapturePane() (string, error) {
 	return string(output), nil
 }
 
-// CaptureFullHistory captures the scrollback history (limited to last 500 lines for performance)
+// CaptureFullHistory captures the scrollback history (limited to last 2000 lines for performance)
 func (s *Session) CaptureFullHistory() (string, error) {
-	// Limit to last 500 lines to prevent memory issues with long-running sessions
+	// Limit to last 2000 lines to balance content availability with memory usage
+	// AI agent conversations can be long - 2000 lines captures ~40-80 screens of content
 	// -J joins wrapped lines and trims trailing spaces so hashes don't change on resize
-	cmd := exec.Command("tmux", "capture-pane", "-t", s.Name, "-p", "-J", "-S", "-500")
+	cmd := exec.Command("tmux", "capture-pane", "-t", s.Name, "-p", "-J", "-S", "-2000")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to capture history: %w", err)
@@ -326,6 +340,10 @@ func (s *Session) HasUpdated() (bool, error) {
 	// Calculate SHA256 hash of content
 	hash := sha256.Sum256([]byte(content))
 	hashStr := hex.EncodeToString(hash[:])
+
+	// Protect access to lastHash and lastContent
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// First time check
 	if s.lastHash == "" {
@@ -347,67 +365,77 @@ func (s *Session) HasUpdated() (bool, error) {
 // DetectTool detects which AI coding tool is running in the session
 // Uses caching to avoid re-detection on every call
 func (s *Session) DetectTool() string {
-	// Return cached result if still valid
+	// Check cache first (read lock pattern for better concurrency)
+	s.mu.Lock()
 	if s.detectedTool != "" && time.Since(s.toolDetectedAt) < s.toolDetectExpiry {
-		return s.detectedTool
+		result := s.detectedTool
+		s.mu.Unlock()
+		return result
 	}
+	s.mu.Unlock()
 
 	// Detect tool from command first (most reliable)
 	if s.Command != "" {
 		cmdLower := strings.ToLower(s.Command)
+		var tool string
 		if strings.Contains(cmdLower, "claude") {
-			s.detectedTool = "claude"
-			s.toolDetectedAt = time.Now()
-			return s.detectedTool
+			tool = "claude"
+		} else if strings.Contains(cmdLower, "gemini") {
+			tool = "gemini"
+		} else if strings.Contains(cmdLower, "aider") {
+			tool = "aider"
+		} else if strings.Contains(cmdLower, "codex") {
+			tool = "codex"
 		}
-		if strings.Contains(cmdLower, "gemini") {
-			s.detectedTool = "gemini"
+		if tool != "" {
+			s.mu.Lock()
+			s.detectedTool = tool
 			s.toolDetectedAt = time.Now()
-			return s.detectedTool
-		}
-		if strings.Contains(cmdLower, "aider") {
-			s.detectedTool = "aider"
-			s.toolDetectedAt = time.Now()
-			return s.detectedTool
-		}
-		if strings.Contains(cmdLower, "codex") {
-			s.detectedTool = "codex"
-			s.toolDetectedAt = time.Now()
-			return s.detectedTool
+			s.mu.Unlock()
+			return tool
 		}
 	}
 
 	// Fallback to content detection
 	content, err := s.CapturePane()
 	if err != nil {
+		s.mu.Lock()
 		s.detectedTool = "shell"
 		s.toolDetectedAt = time.Now()
-		return s.detectedTool
+		s.mu.Unlock()
+		return "shell"
 	}
 
 	// Strip ANSI codes for accurate matching
 	cleanContent := StripANSI(content)
 
 	// Check using pre-compiled patterns
+	detectedTool := "shell"
 	for tool, patterns := range toolDetectionPatterns {
 		for _, pattern := range patterns {
 			if pattern.MatchString(cleanContent) {
-				s.detectedTool = tool
-				s.toolDetectedAt = time.Now()
-				return s.detectedTool
+				detectedTool = tool
+				break
 			}
+		}
+		if detectedTool != "shell" {
+			break
 		}
 	}
 
-	s.detectedTool = "shell"
+	s.mu.Lock()
+	s.detectedTool = detectedTool
 	s.toolDetectedAt = time.Now()
-	return s.detectedTool
+	s.mu.Unlock()
+	return detectedTool
 }
 
 // ForceDetectTool forces a re-detection of the tool, ignoring cache
 func (s *Session) ForceDetectTool() string {
+	s.mu.Lock()
 	s.detectedTool = ""
 	s.toolDetectedAt = time.Time{}
+	s.mu.Unlock()
 	return s.DetectTool()
 }
 
@@ -427,8 +455,8 @@ func (s *Session) AcknowledgeWithSnapshot() {
 		content, captureErr = s.CapturePane()
 	}
 
-	s.stateTrackerMu.Lock()
-	defer s.stateTrackerMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	s.ensureStateTrackerLocked()
 
@@ -463,9 +491,10 @@ func (s *Session) AcknowledgeWithSnapshot() {
 // GetStatus returns the current status of the session
 //
 // Time-based 3-state model to prevent flickering:
-//   GREEN (active)   = Content changed within activityCooldown (2 seconds)
-//   YELLOW (waiting) = Cooldown expired + NOT acknowledged (needs attention)
-//   GRAY (idle)      = Cooldown expired + acknowledged (user has seen it)
+//
+//	GREEN (active)   = Content changed within activityCooldown (2 seconds)
+//	YELLOW (waiting) = Cooldown expired + NOT acknowledged (needs attention)
+//	GRAY (idle)      = Cooldown expired + acknowledged (user has seen it)
 //
 // Key insight: AI agents output in bursts with micro-pauses. A time-based
 // cooldown prevents flickering during these natural pauses - we stay GREEN
@@ -475,8 +504,8 @@ func (s *Session) AcknowledgeWithSnapshot() {
 // 1. Capture content and hash it
 // 2. If hash changed → update lastChangeTime, return GREEN
 // 3. If hash same → check if cooldown expired
-//    - If within cooldown → GREEN (still considered active)
-//    - If cooldown expired → YELLOW or GRAY based on acknowledged
+//   - If within cooldown → GREEN (still considered active)
+//   - If cooldown expired → YELLOW or GRAY based on acknowledged
 func (s *Session) GetStatus() (string, error) {
 	shortName := s.DisplayName
 	if len(shortName) > 12 {
@@ -485,9 +514,9 @@ func (s *Session) GetStatus() (string, error) {
 
 	// Perform expensive operations before acquiring lock
 	if !s.Exists() {
-		s.stateTrackerMu.Lock()
+		s.mu.Lock()
 		s.lastStableStatus = "inactive"
-		s.stateTrackerMu.Unlock()
+		s.mu.Unlock()
 		debugLog("%s: session doesn't exist → inactive", shortName)
 		return "inactive", nil
 	}
@@ -495,9 +524,9 @@ func (s *Session) GetStatus() (string, error) {
 	// Capture current content (slow operation - do before lock)
 	content, err := s.CapturePane()
 	if err != nil {
-		s.stateTrackerMu.Lock()
+		s.mu.Lock()
 		s.lastStableStatus = "inactive"
-		s.stateTrackerMu.Unlock()
+		s.mu.Unlock()
 		debugLog("%s: capture error → inactive", shortName)
 		return "inactive", nil
 	}
@@ -507,8 +536,8 @@ func (s *Session) GetStatus() (string, error) {
 	// This catches cases where normalized content hash doesn't change
 	// (e.g., "Thinking... (40s)" → "Thinking... (41s)" both normalize to same hash)
 	if s.hasBusyIndicator(content) {
-		s.stateTrackerMu.Lock()
-		defer s.stateTrackerMu.Unlock()
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		s.ensureStateTrackerLocked()
 		s.stateTracker.lastChangeTime = time.Now() // Reset cooldown
 		s.stateTracker.acknowledged = false
@@ -527,8 +556,8 @@ func (s *Session) GetStatus() (string, error) {
 	}
 
 	// Now acquire lock for state manipulation
-	s.stateTrackerMu.Lock()
-	defer s.stateTrackerMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Initialize state tracker on first call
 	// === SIMPLIFIED STATUS LOGIC ===
@@ -598,8 +627,8 @@ func (s *Session) GetStatus() (string, error) {
 // Acknowledge marks the session as "seen" by the user
 // Call this when user attaches to the session
 func (s *Session) Acknowledge() {
-	s.stateTrackerMu.Lock()
-	defer s.stateTrackerMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	s.ensureStateTrackerLocked()
 	s.stateTracker.acknowledged = true
@@ -610,14 +639,13 @@ func (s *Session) Acknowledge() {
 // Call this when a hook event indicates the agent finished (Stop, AfterAgent)
 // This ensures the session shows yellow (waiting) instead of gray (idle)
 func (s *Session) ResetAcknowledged() {
-	s.stateTrackerMu.Lock()
-	defer s.stateTrackerMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	s.ensureStateTrackerLocked()
 	s.stateTracker.acknowledged = false
 	s.lastStableStatus = "waiting"
 }
-
 
 // hasBusyIndicator checks if the terminal shows explicit busy indicators
 // This is a quick check used in GetStatus() to detect active processing
@@ -795,8 +823,12 @@ func (s *Session) hashContent(content string) string {
 }
 
 // SendKeys sends keys to the tmux session
+// Uses -l flag to treat keys as literal text, preventing tmux special key interpretation
 func (s *Session) SendKeys(keys string) error {
-	cmd := exec.Command("tmux", "send-keys", "-t", s.Name, keys)
+	// The -l flag makes tmux treat the string as literal text, not key names
+	// This prevents issues like "Enter" being interpreted as the Enter key
+	// and provides a layer of safety against tmux special sequences
+	cmd := exec.Command("tmux", "send-keys", "-l", "-t", s.Name, keys)
 	return cmd.Run()
 }
 

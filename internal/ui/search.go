@@ -31,13 +31,13 @@ var (
 
 // Search represents the search overlay component
 type Search struct {
-	input      textinput.Model
-	results    []*session.Instance
-	cursor     int
-	width      int
-	height     int
-	visible    bool
-	allItems   []*session.Instance
+	input    textinput.Model
+	results  []*session.Instance
+	cursor   int
+	width    int
+	height   int
+	visible  bool
+	allItems []*session.Instance
 }
 
 // NewSearch creates a new search overlay
@@ -97,9 +97,10 @@ func (s *Search) Selected() *session.Instance {
 }
 
 // Update handles messages for the search overlay
-func (s *Search) Update(msg tea.Msg) tea.Cmd {
+// Returns the updated Search and any command to execute
+func (s *Search) Update(msg tea.Msg) (*Search, tea.Cmd) {
 	if !s.visible {
-		return nil
+		return s, nil
 	}
 
 	switch msg := msg.(type) {
@@ -107,37 +108,37 @@ func (s *Search) Update(msg tea.Msg) tea.Cmd {
 		switch msg.String() {
 		case "esc":
 			s.Hide()
-			return nil
+			return s, nil
 
 		case "enter":
 			if len(s.results) > 0 {
 				s.Hide()
 				// Parent should handle the selection
 			}
-			return nil
+			return s, nil
 
 		case "up", "ctrl+k":
 			if s.cursor > 0 {
 				s.cursor--
 			}
-			return nil
+			return s, nil
 
 		case "down", "ctrl+j":
 			if s.cursor < len(s.results)-1 {
 				s.cursor++
 			}
-			return nil
+			return s, nil
 
 		default:
 			// Update text input
 			var cmd tea.Cmd
 			s.input, cmd = s.input.Update(msg)
 			s.updateResults()
-			return cmd
+			return s, cmd
 		}
 	}
 
-	return nil
+	return s, nil
 }
 
 // updateResults filters the items based on the current input

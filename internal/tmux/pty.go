@@ -1,3 +1,6 @@
+//go:build !windows
+// +build !windows
+
 package tmux
 
 import (
@@ -46,26 +49,42 @@ func (s *Session) Attach(ctx context.Context) error {
 	// Handle window resize signals
 	sigwinch := make(chan os.Signal, 1)
 	signal.Notify(sigwinch, syscall.SIGWINCH)
+	sigwinchDone := make(chan struct{}) // Signal for SIGWINCH goroutine to exit
 	defer func() {
 		signal.Stop(sigwinch)
-		close(sigwinch) // Allows goroutine to exit cleanly
+		close(sigwinchDone) // Signal goroutine to exit
+		close(sigwinch)     // Allow range to complete
 	}()
 
+	// WaitGroup to track ALL goroutines (including SIGWINCH handler)
+	var wg sync.WaitGroup
+
+	// SIGWINCH handler goroutine - properly tracked in WaitGroup
+	wg.Add(1)
 	go func() {
-		for range sigwinch {
-			if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
-				pty.Setsize(ptmx, ws)
+		defer wg.Done()
+		for {
+			select {
+			case <-sigwinchDone:
+				return
+			case _, ok := <-sigwinch:
+				if !ok {
+					return
+				}
+				if ws, err := pty.GetsizeFull(os.Stdin); err == nil {
+					pty.Setsize(ptmx, ws)
+				}
 			}
 		}
 	}()
 	// Initial resize
 	sigwinch <- syscall.SIGWINCH
 
-	// WaitGroup to track goroutines
-	var wg sync.WaitGroup
-
 	// Channel to signal detach via Ctrl+Q
 	detachCh := make(chan struct{})
+
+	// Channel for I/O errors (buffered to prevent goroutine leaks)
+	ioErrors := make(chan error, 2)
 
 	// Timeout to ignore initial terminal control sequences (50ms)
 	startTime := time.Now()
@@ -75,7 +94,15 @@ func (s *Session) Attach(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		io.Copy(os.Stdout, ptmx)
+		_, err := io.Copy(os.Stdout, ptmx)
+		if err != nil && err != io.EOF {
+			// Only report non-EOF errors (EOF is normal on PTY close)
+			select {
+			case ioErrors <- fmt.Errorf("PTY read error: %w", err):
+			default:
+				// Channel full, error already reported
+			}
+		}
 	}()
 
 	// Goroutine 2: Read stdin, intercept Ctrl+Q (ASCII 17), forward rest to PTY
@@ -88,6 +115,11 @@ func (s *Session) Attach(ctx context.Context) error {
 			if err != nil {
 				if err == io.EOF {
 					break
+				}
+				// Report stdin read error
+				select {
+				case ioErrors <- fmt.Errorf("stdin read error: %w", err):
+				default:
 				}
 				return
 			}
@@ -106,13 +138,22 @@ func (s *Session) Attach(ctx context.Context) error {
 			}
 
 			// Forward other input to tmux PTY
-			ptmx.Write(buf[:n])
+			if _, err := ptmx.Write(buf[:n]); err != nil {
+				// Report PTY write error
+				select {
+				case ioErrors <- fmt.Errorf("PTY write error: %w", err):
+				default:
+				}
+				return
+			}
 		}
 	}()
 
-	// Wait for command to finish
+	// Wait for command to finish - tracked in WaitGroup
 	cmdDone := make(chan error, 1)
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		cmdDone <- cmd.Wait()
 	}()
 
@@ -204,8 +245,12 @@ func (s *Session) StreamOutput(ctx context.Context, w io.Writer) error {
 	}
 
 	// Wait for context cancellation or command completion
+	// Use WaitGroup to prevent goroutine leak on context cancellation
+	var wg sync.WaitGroup
 	errChan := make(chan error, 1)
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		errChan <- cmd.Wait()
 	}()
 
@@ -215,6 +260,8 @@ func (s *Session) StreamOutput(ctx context.Context, w io.Writer) error {
 		// already returning ctx.Err() and cleanup failure is non-fatal
 		stopCmd := exec.Command("tmux", "pipe-pane", "-t", s.Name)
 		_ = stopCmd.Run()
+		// Wait for the goroutine to complete before returning
+		wg.Wait()
 		return ctx.Err()
 	case err := <-errChan:
 		if err != nil {

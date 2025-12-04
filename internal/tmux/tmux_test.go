@@ -12,7 +12,7 @@ import (
 
 func TestSanitizeName(t *testing.T) {
 	tests := []struct {
-		input string
+		input    string
 		expected string
 	}{
 		{"my-session", "my-session"},
@@ -73,7 +73,7 @@ func TestPromptDetector(t *testing.T) {
 	shellDetector := NewPromptDetector("shell")
 
 	shellTests := []struct {
-		content string
+		content  string
 		expected bool
 	}{
 		{"Do you want to continue? (Y/n)", true},
@@ -97,7 +97,7 @@ func TestPromptDetector(t *testing.T) {
 	claudeDetector := NewPromptDetector("claude")
 
 	claudeTests := []struct {
-		content string
+		content  string
 		expected bool
 	}{
 		// Permission prompts (normal mode)
@@ -126,7 +126,7 @@ func TestPromptDetector(t *testing.T) {
 	aiderDetector := NewPromptDetector("aider")
 
 	aiderTests := []struct {
-		content string
+		content  string
 		expected bool
 	}{
 		{"(Y)es/(N)o/(D)on't ask again", true},
@@ -147,8 +147,8 @@ func TestBusyIndicatorDetection(t *testing.T) {
 	sess.Command = "claude"
 
 	tests := []struct {
-		name string
-		content string
+		name     string
+		content  string
 		expected bool
 	}{
 		{
@@ -190,7 +190,7 @@ func TestBusyIndicatorDetection(t *testing.T) {
 
 func TestStripANSI(t *testing.T) {
 	tests := []struct {
-		input string
+		input    string
 		expected string
 	}{
 		{"\x1b[32mGreen\x1b[0m", "Green"},
@@ -242,10 +242,10 @@ func TestReconnectSession(t *testing.T) {
 // TestClaudeCodeDetectionScenarios tests all Claude Code status detection scenarios
 func TestClaudeCodeDetectionScenarios(t *testing.T) {
 	tests := []struct {
-		name string
-		content string
+		name          string
+		content       string
 		expectWaiting bool
-		description string
+		description   string
 	}{
 		// --dangerously-skip-permissions mode scenarios
 		{
@@ -315,14 +315,14 @@ Thinking... (45s · 1234 tokens · esc to interrupt)`,
 		},
 		// Edge cases
 		{
-			name: "edge: empty content",
-			content: ``,
+			name:          "edge: empty content",
+			content:       ``,
 			expectWaiting: false,
 			description:   "Empty terminal",
 		},
 		{
-			name: "edge: just whitespace",
-			content: "\n   ",
+			name:          "edge: just whitespace",
+			content:       "\n   ",
 			expectWaiting: false,
 			description:   "Only whitespace",
 		},
@@ -1231,10 +1231,10 @@ func TestStatusFlickerOnInvisibleCharsIntegration(t *testing.T) {
 	assert.Equal(t, "idle", status, "Initial status should be 'idle' (no yellow flash on init)")
 
 	// Set up "needs attention" state: acknowledged=false, cooldown expired
-	session.stateTrackerMu.Lock()
+	session.mu.Lock()
 	session.stateTracker.lastChangeTime = time.Now().Add(-3 * time.Second)
 	session.stateTracker.acknowledged = false // Mark as needing attention
-	session.stateTrackerMu.Unlock()
+	session.mu.Unlock()
 
 	// Poll 2: Same content, cooldown expired, acknowledged=false → "waiting"
 	status, err = session.GetStatus()
@@ -1247,10 +1247,10 @@ func TestStatusFlickerOnInvisibleCharsIntegration(t *testing.T) {
 	sendToPane(flickerContent)
 
 	// Expire cooldown again and ensure acknowledged stays false
-	session.stateTrackerMu.Lock()
+	session.mu.Lock()
 	session.stateTracker.lastChangeTime = time.Now().Add(-3 * time.Second)
 	session.stateTracker.acknowledged = false // Keep needing attention
-	session.stateTrackerMu.Unlock()
+	session.mu.Unlock()
 
 	// Poll 3: normalizeContent should strip the BEL, so no real change detected
 	// Status should remain "waiting" (not flicker to "active")
@@ -1377,11 +1377,11 @@ func TestTimeBasedStatusModel(t *testing.T) {
 
 // TestDynamicTimeCounterCausesFlickering demonstrates the flickering bug
 // Scenario:
-//   1. Claude Code finishes outputting, shows "45s · 1234 tokens"
-//   2. Status correctly shows YELLOW (waiting)
-//   3. One second later, content shows "46s · 1234 tokens"
-//   4. BUG: Hash changes → status flickers to GREEN
-//   5. Cooldown expires → back to YELLOW
+//  1. Claude Code finishes outputting, shows "45s · 1234 tokens"
+//  2. Status correctly shows YELLOW (waiting)
+//  3. One second later, content shows "46s · 1234 tokens"
+//  4. BUG: Hash changes → status flickers to GREEN
+//  5. Cooldown expires → back to YELLOW
 func TestDynamicTimeCounterCausesFlickering(t *testing.T) {
 	session := NewSession("flicker-test", "/tmp")
 
@@ -1438,44 +1438,44 @@ func TestNormalizeShouldStripTimeCounters(t *testing.T) {
 	session := NewSession("normalize-test", "/tmp")
 
 	tests := []struct {
-		name     string
-		content1 string
-		content2 string
+		name        string
+		content1    string
+		content2    string
 		shouldMatch bool
 		description string
 	}{
 		{
-			name: "Time counter in parentheses",
-			content1: "Working... (45s · 1234 tokens · esc to interrupt)",
-			content2: "Working... (46s · 1234 tokens · esc to interrupt)",
+			name:        "Time counter in parentheses",
+			content1:    "Working... (45s · 1234 tokens · esc to interrupt)",
+			content2:    "Working... (46s · 1234 tokens · esc to interrupt)",
 			shouldMatch: true, // After fix, these should normalize to the same hash
 			description: "Time counters like '45s' should be stripped",
 		},
 		{
-			name: "Token count changes",
-			content1: "Processing (10s · 100 tokens)",
-			content2: "Processing (10s · 150 tokens)",
+			name:        "Token count changes",
+			content1:    "Processing (10s · 100 tokens)",
+			content2:    "Processing (10s · 150 tokens)",
 			shouldMatch: true, // Token counts can change, should be stripped
 			description: "Token counts should be stripped",
 		},
 		{
-			name: "Standalone time",
-			content1: "Last updated: 45s ago",
-			content2: "Last updated: 46s ago",
+			name:        "Standalone time",
+			content1:    "Last updated: 45s ago",
+			content2:    "Last updated: 46s ago",
 			shouldMatch: true,
 			description: "Standalone time indicators should be stripped",
 		},
 		{
-			name: "Actual content change - should NOT match",
-			content1: "I will edit file A",
-			content2: "I will edit file B",
+			name:        "Actual content change - should NOT match",
+			content1:    "I will edit file A",
+			content2:    "I will edit file B",
 			shouldMatch: false,
 			description: "Real content changes should produce different hashes",
 		},
 		{
-			name: "Braille spinners already stripped",
-			content1: "Loading ⠋",
-			content2: "Loading ⠙",
+			name:        "Braille spinners already stripped",
+			content1:    "Loading ⠋",
+			content2:    "Loading ⠙",
 			shouldMatch: true,
 			description: "Braille spinners should be stripped (already implemented)",
 		},

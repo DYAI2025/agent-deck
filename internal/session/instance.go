@@ -22,15 +22,15 @@ const (
 
 // Instance represents a single agent/shell session
 type Instance struct {
-	ID          string         `json:"id"`
-	Title       string         `json:"title"`
-	ProjectPath string         `json:"project_path"`
-	GroupPath   string         `json:"group_path"` // e.g., "projects/devops"
-	Command     string         `json:"command"`
-	Tool        string         `json:"tool"`
-	Status      Status         `json:"status"`
-	CreatedAt   time.Time      `json:"created_at"`
-	tmuxSession *tmux.Session  // Internal tmux session
+	ID          string        `json:"id"`
+	Title       string        `json:"title"`
+	ProjectPath string        `json:"project_path"`
+	GroupPath   string        `json:"group_path"` // e.g., "projects/devops"
+	Command     string        `json:"command"`
+	Tool        string        `json:"tool"`
+	Status      Status        `json:"status"`
+	CreatedAt   time.Time     `json:"created_at"`
+	tmuxSession *tmux.Session // Internal tmux session
 }
 
 // NewInstance creates a new session instance
@@ -72,7 +72,7 @@ func extractGroupPath(projectPath string) string {
 			return part
 		}
 	}
-	return "default"
+	return DefaultGroupName
 }
 
 // Start starts the session in tmux

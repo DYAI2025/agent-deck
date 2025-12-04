@@ -19,7 +19,7 @@ Thank you for your interest in contributing to Agent Deck! This document provide
 
 ### Prerequisites
 
-- Go 1.21 or later
+- Go 1.24 or later (or Go 1.21+ with automatic toolchain download)
 - tmux
 - Make
 

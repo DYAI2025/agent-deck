@@ -1,12 +1,18 @@
 <div align="center">
 
+```
+┌──┬──┬──┐
+│● │◐ │○ │
+└──┴──┴──┘
+```
+
 # Agent Deck
 
 **Terminal session manager for AI coding agents**
 
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev)
+[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey)](https://github.com/asheshgoplani/agent-deck)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20WSL-lightgrey)](https://github.com/asheshgoplani/agent-deck)
 
 [Features](#features) • [Installation](#installation) • [Usage](#usage) • [Documentation](#documentation) • [Contributing](#contributing)
 
@@ -14,14 +20,14 @@
 
 ---
 
-<!-- TODO: Add demo GIF here -->
-<!-- ![Agent Deck Demo](docs/demo.gif) -->
+<!-- TODO: Add demo video here - drag mp4 into GitHub issue, copy URL -->
+<!-- https://github.com/user-attachments/assets/YOUR-VIDEO-UUID -->
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  🎛️  Agent Deck                              8 sessions   [/] Search    │
+│  [●│◐│○] Agent Deck                          8 sessions   [/] Search    │
 ├────────────────────────┬────────────────────────────────────────────────┤
-│  📁 Projects           │  Preview: devops/claude-1                      │
+│  SESSIONS              │  Preview: devops/claude-1                      │
 │  ▼ projects (4)     ●  │  $ claude                                      │
 │    ▶ devops/claude  ●  │  I'll help you with the deployment...          │
 │      devops/shell   ○  │                                                │
@@ -73,41 +79,67 @@ Works out-of-the-box with Claude Code, Gemini CLI, Aider, and Codex—detecting 
 
 ### Prerequisites
 
-- **macOS** or **Linux**
+- **macOS**, **Linux**, or **Windows (via WSL)**
 - **[tmux](https://github.com/tmux/tmux)** — Terminal multiplexer
   ```bash
   # macOS
   brew install tmux
 
-  # Ubuntu/Debian
+  # Ubuntu/Debian/WSL
   sudo apt install tmux
 
   # Fedora
   sudo dnf install tmux
   ```
-- **[Go 1.21+](https://go.dev/dl/)** — For building from source
 
-### Quick Install
+### Quick Install (Recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/asheshgoplani/agent-deck/main/install.sh | bash
+```
+
+This downloads the latest release and installs to `~/.local/bin`.
+
+**Options:**
+```bash
+# Custom binary name
+curl -fsSL https://raw.githubusercontent.com/asheshgoplani/agent-deck/main/install.sh | bash -s -- --name ad
+
+# Custom install directory
+curl -fsSL https://raw.githubusercontent.com/asheshgoplani/agent-deck/main/install.sh | bash -s -- --dir /usr/local/bin
+
+# Specific version
+curl -fsSL https://raw.githubusercontent.com/asheshgoplani/agent-deck/main/install.sh | bash -s -- --version v0.2.0
+```
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew install asheshgoplani/tap/agent-deck
+```
+
+### Go Install
+
+```bash
+go install github.com/asheshgoplani/agent-deck/cmd/agent-deck@latest
+```
+
+Requires Go 1.24+ and `$GOPATH/bin` in your PATH.
+
+### From Source
 
 ```bash
 git clone https://github.com/asheshgoplani/agent-deck.git
 cd agent-deck
-make install
+make install          # Install to /usr/local/bin (requires sudo)
+# or
+make install-user     # Install to ~/.local/bin (no sudo)
 ```
 
-This installs `agent-deck` to `/usr/local/bin`.
-
-### Alternative: User Install
+### Verify Installation
 
 ```bash
-make install-user  # Installs to ~/.local/bin
-```
-
-### Build Only
-
-```bash
-make build
-./build/agent-deck
+agent-deck version
 ```
 
 ## Usage

@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
@@ -288,11 +289,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.groupTree.AddSession(msg.instance)
 			h.rebuildFlatItems()
 			h.search.SetItems(h.instances)
-			if h.storage != nil {
-				if err := h.storage.Save(h.instances); err != nil {
-					h.err = fmt.Errorf("failed to save session: %w", err)
-				}
-			}
+			// Save both instances AND groups (critical fix: was losing groups!)
+			h.saveInstances()
 		}
 		return h, nil
 
@@ -318,15 +316,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 		// Update search items
 		h.search.SetItems(h.instances)
-		// Save to storage
-		if h.storage != nil {
-			if err := h.storage.Save(h.instances); err != nil {
-				// Only set error if no kill error (kill error takes precedence as it's more actionable)
-				if h.err == nil {
-					h.err = fmt.Errorf("failed to save after delete: %w", err)
-				}
-			}
-		}
+		// Save both instances AND groups (critical fix: was losing groups!)
+		h.saveInstances()
 		return h, nil
 
 	case refreshMsg:
@@ -411,10 +402,17 @@ func (h *Home) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		selected := h.search.Selected()
 		if selected != nil {
-			// Find index and select
-			for i, inst := range h.instances {
-				if inst.ID == selected.ID {
+			// Ensure the session's group AND all parent groups are expanded so it's visible
+			if selected.GroupPath != "" {
+				h.groupTree.ExpandGroupWithParents(selected.GroupPath)
+			}
+			h.rebuildFlatItems()
+
+			// Find the session in flatItems (not instances) and set cursor
+			for i, item := range h.flatItems {
+				if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == selected.ID {
 					h.cursor = i
+					h.syncViewport() // Ensure the cursor is visible in the viewport
 					break
 				}
 			}
@@ -464,12 +462,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		h.cancel()
-		if h.storage != nil {
-			// Best effort save on quit - log error but don't block exit
-			if err := h.storage.Save(h.instances); err != nil {
-				log.Printf("Warning: failed to save on quit: %v", err)
-			}
-		}
+		// Save both instances AND groups on quit (critical fix: was losing groups!)
+		h.saveInstances()
 		return h, tea.Quit
 
 	case "up", "k":
@@ -896,12 +890,12 @@ func (h *Home) importSessions() tea.Msg {
 	}
 
 	h.instances = append(h.instances, discovered...)
-	if h.storage != nil {
-		if err := h.storage.Save(h.instances); err != nil {
-			// Log but continue - sessions are imported even if save fails
-			log.Printf("Warning: failed to save after import: %v", err)
-		}
+	// Add discovered sessions to group tree before saving
+	for _, inst := range discovered {
+		h.groupTree.AddSession(inst)
 	}
+	// Save both instances AND groups (critical fix: was losing groups!)
+	h.saveInstances()
 	return loadSessionsMsg{instances: h.instances}
 }
 
@@ -1449,7 +1443,17 @@ func (h *Home) renderPreviewPane(width, height int) string {
 		if maxLines < 1 {
 			maxLines = 1
 		}
-		if len(lines) > maxLines {
+
+		// Track if we're truncating from the top (for indicator)
+		truncatedFromTop := len(lines) > maxLines
+		truncatedCount := 0
+		if truncatedFromTop {
+			// Reserve one line for the truncation indicator
+			maxLines--
+			if maxLines < 1 {
+				maxLines = 1
+			}
+			truncatedCount = len(lines) - maxLines
 			lines = lines[len(lines)-maxLines:]
 		}
 
@@ -1459,20 +1463,39 @@ func (h *Home) renderPreviewPane(width, height int) string {
 			maxWidth = 10
 		}
 
+		// Show truncation indicator if content was cut from top
+		if truncatedFromTop {
+			truncIndicator := lipgloss.NewStyle().
+				Foreground(ColorTextDim).
+				Italic(true).
+				Render(fmt.Sprintf("⋮ %d more lines above", truncatedCount))
+			b.WriteString(truncIndicator)
+			b.WriteString("\n")
+		}
+
+		// Track consecutive empty lines to preserve some spacing
+		consecutiveEmpty := 0
+		const maxConsecutiveEmpty = 2 // Allow up to 2 consecutive empty lines
+
 		for _, line := range lines {
-			// Strip ANSI codes for accurate length measurement
+			// Strip ANSI codes for accurate width measurement
 			cleanLine := tmux.StripANSI(line)
 
-			// Skip completely empty lines to reduce noise
+			// Handle empty lines - preserve some for readability
 			trimmed := strings.TrimSpace(cleanLine)
 			if trimmed == "" {
+				consecutiveEmpty++
+				if consecutiveEmpty <= maxConsecutiveEmpty {
+					b.WriteString("\n") // Preserve empty line
+				}
 				continue
 			}
+			consecutiveEmpty = 0 // Reset counter on non-empty line
 
-			// Truncate based on visible character length (runes, not bytes)
-			runes := []rune(cleanLine)
-			if len(runes) > maxWidth {
-				cleanLine = string(runes[:maxWidth-3]) + "..."
+			// Truncate based on display width (handles CJK, emoji correctly)
+			displayWidth := runewidth.StringWidth(cleanLine)
+			if displayWidth > maxWidth {
+				cleanLine = runewidth.Truncate(cleanLine, maxWidth-3, "...")
 			}
 
 			b.WriteString(previewStyle.Render(cleanLine))

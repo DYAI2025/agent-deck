@@ -229,6 +229,60 @@ func TestToggleGroup(t *testing.T) {
 	}
 }
 
+func TestExpandGroupWithParents(t *testing.T) {
+	// Create a tree with nested groups
+	instances := []*Instance{
+		{ID: "1", Title: "deep-session", GroupPath: "parent/child/grandchild"},
+	}
+
+	tree := NewGroupTree(instances)
+
+	// Create parent and child groups explicitly
+	tree.CreateGroup("parent")
+	tree.CreateSubgroup("parent", "child")
+	tree.CreateSubgroup("parent/child", "grandchild")
+
+	// Collapse all groups
+	tree.CollapseGroup("parent")
+	tree.CollapseGroup("parent/child")
+	tree.CollapseGroup("parent/child/grandchild")
+
+	// Verify all collapsed
+	if tree.Groups["parent"].Expanded {
+		t.Error("parent should be collapsed")
+	}
+	if tree.Groups["parent/child"].Expanded {
+		t.Error("parent/child should be collapsed")
+	}
+
+	// Now expand with parents
+	tree.ExpandGroupWithParents("parent/child/grandchild")
+
+	// All should be expanded now
+	if !tree.Groups["parent"].Expanded {
+		t.Error("parent should be expanded after ExpandGroupWithParents")
+	}
+	if !tree.Groups["parent/child"].Expanded {
+		t.Error("parent/child should be expanded after ExpandGroupWithParents")
+	}
+	if !tree.Groups["parent/child/grandchild"].Expanded {
+		t.Error("parent/child/grandchild should be expanded after ExpandGroupWithParents")
+	}
+
+	// Verify session is now visible in flattened view
+	items := tree.Flatten()
+	foundSession := false
+	for _, item := range items {
+		if item.Type == ItemTypeSession && item.Session != nil && item.Session.ID == "1" {
+			foundSession = true
+			break
+		}
+	}
+	if !foundSession {
+		t.Error("Session should be visible in flattened view after ExpandGroupWithParents")
+	}
+}
+
 func TestRenameGroup(t *testing.T) {
 	instances := []*Instance{
 		{ID: "1", Title: "session-1", GroupPath: "old-name"},

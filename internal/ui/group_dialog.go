@@ -49,7 +49,7 @@ func NewGroupDialog() *GroupDialog {
 func (g *GroupDialog) Show() {
 	g.visible = true
 	g.mode = GroupDialogCreate
-	g.groupPath = ""    // No parent = root level
+	g.groupPath = "" // No parent = root level
 	g.parentName = ""
 	g.nameInput.SetValue("")
 	g.nameInput.Focus()
@@ -59,7 +59,7 @@ func (g *GroupDialog) Show() {
 func (g *GroupDialog) ShowCreateSubgroup(parentPath, parentName string) {
 	g.visible = true
 	g.mode = GroupDialogCreate
-	g.groupPath = parentPath  // Parent path for the new subgroup
+	g.groupPath = parentPath // Parent path for the new subgroup
 	g.parentName = parentName
 	g.nameInput.SetValue("")
 	g.nameInput.Focus()

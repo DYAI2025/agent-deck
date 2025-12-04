@@ -5,7 +5,6 @@ import (
 	"testing"
 )
 
-
 // TestNewSessionStatusFlicker tests for green flicker on new session creation
 // This reproduces the issue where a session briefly shows green before first poll
 func TestNewSessionStatusFlicker(t *testing.T) {
